@@ -5,5 +5,6 @@ use std::net::TcpListener;
 async fn main() -> std::io::Result<()>{
     let listener = TcpListener::bind("127.0.0.1:8000").expect("failed to get port");
 
-    run(listener)?.await
+    let server = zero2prod::run(listener);
+    server?.await
 }
