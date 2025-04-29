@@ -8,8 +8,9 @@
 // 위의 매크로가 생성하는 코드를 확인할 수 있다. 
 use reqwest::{self, Client};
 use std::net::TcpListener;
-use sqlx::{PgConnection, PgPool, Connection};
-use zero2prod::configuration::get_configuration;
+use sqlx::{PgConnection, PgPool, Connection, query};
+use zero2prod::configuration::{get_configuration, DatabaseSettings};
+use uuid::Uuid;
 
 pub struct TestApp {
     pub address: String,
@@ -19,12 +20,12 @@ pub struct TestApp {
 #[tokio::test]
 async fn health_check_works(){
 	// 준비
-    let address = spawn_app();
+    let app = spawn_app().await;
 	// reqwest 를 통해서 클라이언트를 생성하고 어플리케이션에 대한 HTTP요청 시도
 	let client = reqwest::Client::new();
 	
 	let response = client
-        .get(&format!("{}/health_check",&address))
+        .get(&format!("{}/health_check",&app.address))
 		.send()
 		.await
 		.expect("Failed to execute request.");
@@ -41,12 +42,9 @@ async fn spawn_app() -> TestApp {
     let port = listener.local_addr().unwrap().port();
     let address = format!("http://127.0.0.1:{}",port);
 
-    let configuration = get_configuration.expect("Failed to read configuration");
-    let connection_pool = PgPool::connect(
-        &configuration.database.connection_string()
-    )
-        .await
-        .expect("Failed to connect to Postgres.");
+    let mut configuration = get_configuration().expect("Failed to read configuration");
+    configuration.database.database_name = Uuid::new_v4().to_string();
+    let connection_pool = configure_database(&configuration.database).await;
 
     let server = zero2prod::startup::run(listener, connection_pool.clone()).expect("Faild to bind address");
     let _ = tokio::spawn(server);
@@ -61,6 +59,31 @@ async fn spawn_app() -> TestApp {
     // tokio::spawn은 생성된 퓨처에 대한 핸들을 반환한다.
     // 하지만 이 퓨처를 다루지 않으므로 일단 무시한다.
     
+}
+
+pub async fn configure_database(config: &DatabaseSettings) -> PgPool {
+    let mut connection = PgConnection::connect(
+        &config.connection_string_without_db()
+    )
+        .await
+        .expect("Failed to connect to Postgres");
+
+    let create_db_query = format!(r#"CREATE DATABASE "{}";"#, config.database_name);
+
+    query(&create_db_query)
+        .execute(&mut connection)
+        .await
+        .expect("Failed to create database.");
+    
+    let connection_pool = PgPool::connect(&config.connection_string())
+        .await
+        .expect("Failed to connect to Postgres.");
+    sqlx::migrate!("./migrations")
+        .run(&connection_pool)
+        .await
+        .expect("Failed to migrate the database");
+    
+    connection_pool
 }
 
 #[tokio::test]
@@ -87,7 +110,7 @@ async fn subscribe_returns_a_200_for_valid_form_data() {
     assert_eq!(200, response.status().as_u16());
 
     let saved = sqlx::query!("SELECT email, name FROM subscriptions",)
-        .fetch_one(&app.db_pool)
+        .fetch_one(&app.connection)
         .await
         .expect("Failed to fetch saved subscription.");
     
@@ -99,7 +122,7 @@ async fn subscribe_returns_a_200_for_valid_form_data() {
 #[tokio::test]
 async fn subscribe_returns_a_400_when_data_is_missing(){
     // Arrange
-    let app_address = spawn_app();
+    let app = spawn_app().await;
     let client = reqwest::Client::new();
     let test_cases = vec![
         ("name=le%20guin","missing the email"),
@@ -110,7 +133,7 @@ async fn subscribe_returns_a_400_when_data_is_missing(){
     for (invalid_body, error_message) in test_cases {
         // Act
         let response = client
-            .post(&format!("{}/subscriptions",&app_address))
+            .post(&format!("{}/subscriptions",&app.address))
             .header("Content-Type","application/x-www-form-urlencoded")
             .body(invalid_body)
             .send()
