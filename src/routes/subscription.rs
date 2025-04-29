@@ -14,7 +14,7 @@ pub async fn subscribe(form: web::Form<FormData>,
 
     match sqlx::query!(
         r#"
-        INSERT INTO subscriptions (id, emiail, name, subscribed_at)
+        INSERT INTO subscriptions (id, email, name, subscribed_at)
         VALUES ($1, $2, $3, $4)
         "#,
         Uuid::new_v4(),
